@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!--
+      =====================================================================
+      Changeset pour créer la table d'audit des migrations de tenants.
+      Ce changeset doit être exécuté sur le schéma par défaut/public.
+      =====================================================================
+    -->
+    <changeSet id="1-create-migration-audit-log-table" author="your-name">
+        <preConditions onFail="MARK_RAN">
+            <!-- Ne s'exécute que si la table n'existe pas déjà -->
+            <not>
+                <tableExists tableName="migration_audit_log" schemaName="public"/>
+            </not>
+        </preConditions>
+
+        <createTable tableName="migration_audit_log"
+                     schemaName="public">
+            <column name="id" type="BIGINT" autoIncrement="true">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="tenant_name" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="step_name" type="VARCHAR(255)"/>
+            <column name="status" type="VARCHAR(50)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="details" type="TEXT"/>
+            <column name="event_timestamp" type="TIMESTAMP WITH TIME ZONE">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <createIndex indexName="idx_audit_log_tenant_timestamp"
+                     tableName="migration_audit_log"
+                     schemaName="public">
+            <column name="tenant_name"/>
+            <column name="event_timestamp"/>
+        </createIndex>
+    </changeSet>
+
+    <changeSet id="2-create-distributed-lock-table" author="gemini-assist">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <tableExists tableName="app_lock" schemaName="public"/>
+            </not>
+        </preConditions>
+
+        <createTable tableName="app_lock"
+                     schemaName="public">
+            <column name="lock_key" type="VARCHAR(255)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="owner_id" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="expires_at" type="TIMESTAMP WITH TIME ZONE">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
+    <changeSet id="3-add-archive-details-to-migration-audit-log" author="gemini-assist">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <columnExists tableName="migration_audit_log" schemaName="public" columnName="archive_details"/>
+            </not>
+        </preConditions>
+        <addColumn tableName="migration_audit_log" schemaName="public">
+            <column name="archive_details" type="VARCHAR(255)"/>
+        </addColumn>
+        <addColumn tableName="migration_audit_log" schemaName="public">
+            <column name="alert_sent" type="BOOLEAN" defaultValueBoolean="false">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>
