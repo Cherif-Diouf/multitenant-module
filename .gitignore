@@ -35,3 +35,8 @@ build/
 ### macOS ###
 .DS_Store
 **/.DS_Store
+
+### Fichiers d'analyse interne (ne pas commiter) ###
+explication.md
+newReadMeGen.md
+newReadMe.md

@@ -1,6 +1,6 @@
 # Bibliothèque de Multi-Tenancy Avancée pour Projets Spring
 
-Cette bibliothèque a pour objectif d'intégrer une gestion multi-tenant robuste et transparente au sein d'une application Spring. Elle est conçue pour isoler complètement les données de différents tenants (clients, organisations, espaces, etc.) sans nécessiter de modification du code métier.
+Cette bibliothèque a pour objectif d'intégrer une gestion multi-tenant robuste et transparente au sein d'une application Spring. Elle est conçue pour isoler complètement les données de différents tenants (clients, organisations, espaces, etc.) sans nécessiter beaucoup de modifications du code métier.
 
 Elle prend en charge la multi-tenancy pour :
 - **Bases de données relationnelles** (JPA/Hibernate)
@@ -14,7 +14,7 @@ Elle prend en charge la multi-tenancy pour :
 - **Événements d'application** (Spring Application Events)
 - **Verrouillage distribué** (ShedLock)
 
-La isolation est garantie par séparation physique des données (un schéma par tenant) et propagation transparente du contexte tenant à travers tous les couches de l'application.
+L'isolation est garantie par séparation physique des données (un schéma par tenant) et propagation transparente du contexte tenant à travers tous les couches de l'application.
 
 ## Principe de Fonctionnement
 
