@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TenantContext.clear()` ne retire plus que la clé MDC `tenant` au lieu d'effacer tout le MDC
   (correlation ids applicatifs préservés).
 - `TenantContext.getCurrentSchemaName()` ne loggue plus en INFO à chaque appel (passage en TRACE).
+- `SchemaBasedMultiTenantConnectionProvider` : le log `selected schema` passe de INFO à TRACE
+  (émis à chaque acquisition de connexion JDBC, il noyait les logs applicatifs).
 
 ### Changed
 - Le `TenantFilter` historique est conditionné à `multitenant.filter.mode=legacy`
