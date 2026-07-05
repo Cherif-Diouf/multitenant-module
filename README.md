@@ -1,78 +1,75 @@
-# Bibliothèque de Multi-Tenancy Avancée pour Projets Spring
+# digital-tmp-multitenant
 
-Cette bibliothèque a pour objectif d'intégrer une gestion multi-tenant robuste et transparente au sein d'une application Spring. Elle est conçue pour isoler complètement les données de différents tenants (clients, organisations, espaces, etc.) sans nécessiter beaucoup de modifications du code métier.
+**Rendez votre application Spring Boot multi-tenant en quelques minutes, sans toucher à votre code métier.**
 
-Elle prend en charge la multi-tenancy pour :
-- **Bases de données relationnelles** (JPA/Hibernate)
-- **Provisioning de tenant à chaud** (CREATE SCHEMA + Liquibase à runtime)
-- **Méthodes asynchrones** (`@Async`, Spring Modulith `@ApplicationModuleListener`)
-- **Messagerie Asynchrone** (Kafka)
-- **Messagerie JMS** (Java Message Service)
-- **Appels inter-services** (Feign)
-- **Cache applicatif** (Spring Cache)
-- **Tâches planifiées** (Spring Scheduling)
-- **Événements d'application** (Spring Application Events)
-- **Verrouillage distribué** (ShedLock)
+Cette librairie isole les données de vos tenants (clients, organisations, agences…) par **un schéma PostgreSQL par tenant**, et propage le contexte tenant de façon transparente à travers toutes les couches de l'application : HTTP, JPA/Hibernate, `@Async`, Kafka, JMS, Feign, cache, tâches planifiées, événements Spring et verrous distribués.
 
-L'isolation est garantie par séparation physique des données (un schéma par tenant) et propagation transparente du contexte tenant à travers tous les couches de l'application.
+Votre code métier écrit `documentRepository.findAll()` — la librairie s'assure que la requête s'exécute dans le schéma du bon tenant. C'est tout.
 
-## Principe de Fonctionnement
+---
 
-L'architecture repose sur une séparation physique des données et une propagation transparente du contexte pour chaque tenant :
+## Sommaire
 
-- **Base de données** : **Un schéma par tenant**. Les données sont complètement isolées au niveau du schéma PostgreSQL.
-- **Kafka** : Le contexte du tenant est propagé via les **en-têtes de message**.
-- **JMS** : Le contexte tenant est transmis via les **propriétés de message** (`tenant`).
-- **API REST/Feign** : Propagation via les **en-têtes HTTP** (`X-TENANT`).
-- **Cache** : Isolation via le **préfixage automatique** des clés de cache avec l'identifiant tenant.
-- **Tâches planifiées** : Exécution **par tenant** avec contexte automatiquement défini.
-- **Événements d'application** : **Wrapping automatique** des événements avec le contexte tenant et dispatch via proxy.
-- **Verrouillage distribué** : Verrous **isolés par schéma** tenant pour ShedLock.
+1. [Comment ça marche — en 30 secondes](#1-comment-ça-marche--en-30-secondes)
+2. [Démarrage rapide](#2-démarrage-rapide)
+3. [Concepts clés](#3-concepts-clés)
+4. [Résolution du tenant HTTP : mode `legacy` et mode `resolver`](#4-résolution-du-tenant-http)
+5. [Propagation automatique du contexte](#5-propagation-automatique-du-contexte)
+6. [Exécuter du code pour un ou plusieurs tenants : `TenantExecutor`](#6-tenantexecutor--exécution-cross-tenant)
+7. [Cycle de vie des tenants : provisioning et dé-provisioning](#7-cycle-de-vie-des-tenants)
+8. [Configuration par tenant : `@TenantConfigurationProperties`](#8-configuration-par-tenant)
+9. [Référence des propriétés](#9-référence-des-propriétés)
+10. [Pièges courants et FAQ](#10-pièges-courants-et-faq)
 
-Cette approche garantit une isolation forte des données, simplifiant des opérations comme la sauvegarde, l'archivage ou la suppression d'un tenant.
+---
 
+## 1. Comment ça marche — en 30 secondes
 
-## Concepts Clés
-
-### Tenant
-Le `Tenant` représente une entité isolée au sein de l'application (un client, une organisation, une division, etc.). Il est identifié par un UUID unique et un nom lisible. Chaque tenant possède son propre schéma de base de données pour garantir l'isolation complète des données.
-
-### TenantContext
-C'est le cœur du système. Cet objet, stocké dans un `InheritableThreadLocal`, détient le `Tenant` courant pour toute la durée du traitement d'une requête ou d'un message. Il est systématiquement initialisé aux points d'entrée de l'application et nettoyé à la fin du traitement pour éviter les fuites de contexte.
-
-> **Note** : `InheritableThreadLocal` propage le contexte aux threads enfants créés directement (`new Thread()`). Pour les **thread pools** (utilisés par `@Async`, Kafka consumers, etc.), la propagation est assurée par les composants dédiés de la bibliothèque (`TenantAsyncConfig`, `TenantKafkaRecordInterceptor`, etc.).
-
-### TenantConfigurationRegistry
-Ce bean centralise la configuration de tous les tenants. Il est peuplé au démarrage en contactant un serveur de configuration et contient les instances des beans de propriétés spécifiques à chaque tenant.
-
-## Mise en Place et Configuration
-
-### 1. Activation
-La bibliothèque est activée en utilisant les profils Spring `multiSchema` et/ou `multitenant`.
-
-#### Démarrage d'un module intégrant la bibliothèque
-Les modules qui intègrent cette bibliothèque doivent être démarrés avec les paramètres JVM suivants :
-
-```bash
--Dserver.servlet.context-path=/app/
--Dserver.port=8080
--Dspring.config.import=optional:configserver:http://localhost:8090/api/config/v1
--Dspring.cloud.config.uri=http://localhost:8090/api/config/v1
--Dspring.profiles.active=multiSchema,multitenant
+```
+Requête HTTP entrante
+        │
+        ▼
+┌─────────────────────────┐     "à quel tenant appartient cette requête ?"
+│  Filtres de la librairie │ ──► header X-TENANT, claim JWT, sous-domaine…
+└───────────┬─────────────┘
+            ▼
+   TenantContext (ThreadLocal)          ◄── le cœur du système
+            │
+            ├──► JPA/Hibernate  ──► SET search_path TO 'tenant_a'   (un schéma par tenant)
+            ├──► Cache          ──► clés préfixées par le tenant
+            ├──► @Async         ──► contexte recopié sur le thread du pool
+            ├──► Kafka / JMS    ──► tenant transporté dans les en-têtes de message
+            ├──► Feign          ──► header X-TENANT ajouté aux appels sortants
+            └──► @TenantScheduled ─► la tâche s'exécute une fois PAR tenant
 ```
 
-**Paramètres essentiels :**
-- `spring.profiles.active` :
-  - `multiSchema` : Active la gestion de schémas multiples
-  - `multitenant` : Active les fonctionnalités multi-tenant (propagation de contexte, etc.)
-- `spring.config.import` : URL du Configuration Manager (préfixe `optional:` pour ne pas bloquer au démarrage si indisponible)
-- `spring.cloud.config.uri` : Même URL, utilisée par Spring Cloud Config Client
+- **Isolation forte** : chaque tenant a son propre schéma PostgreSQL. Sauvegarder, archiver ou
+  supprimer un tenant = manipuler un schéma.
+- **Transparence** : le contexte est posé aux points d'entrée (HTTP, message, tâche planifiée)
+  et nettoyé automatiquement en fin de traitement. Les repositories, services et contrôleurs
+  n'ont **aucune** connaissance du multi-tenant.
+- **Extensible** : la façon d'identifier le tenant d'une requête est un point d'extension (SPI).
+  La librairie ne fait aucune hypothèse sur votre fournisseur d'identité.
 
-Vous pouvez également utiliser l'annotation `@EnableSidebar` sur votre classe de configuration principale pour activer automatiquement toutes les fonctionnalités :
+---
+
+## 2. Démarrage rapide
+
+### Étape 1 — Ajouter la dépendance
+
+```xml
+<dependency>
+    <groupId>net.atos.digital</groupId>
+    <artifactId>multitenant</artifactId>
+    <version>${digital-tmp-multitenant.version}</version>
+</dependency>
+```
+
+### Étape 2 — Activer la librairie
 
 ```java
 @SpringBootApplication
-@EnableSidebar
+@EnableSidebar          // active le scan des composants de la librairie
 public class MyApplication {
     public static void main(String[] args) {
         SpringApplication.run(MyApplication.class, args);
@@ -80,252 +77,348 @@ public class MyApplication {
 }
 ```
 
-Cette annotation active automatiquement :
-- Le scan des composants de la bibliothèque
-- Le scan des propriétés de configuration
-- Toutes les fonctionnalités multi-tenant
+Puis démarrer l'application avec les bons **profils Spring** :
 
-### 2. Configuration des Propriétés
+```bash
+-Dspring.profiles.active=multiSchema,multitenant
+```
 
-#### Configuration Globale (`SchemaConfigurationProperties`)
-Les modules qui intègrent cette bibliothèque doivent définir les propriétés de configuration suivantes :
+| Profil | Rôle |
+|---|---|
+| `multiSchema` | Active le routage multi-schéma (Hibernate, Liquibase, scheduling par tenant…) |
+| `multitenant` | Active les tenants **dynamiques** (registre alimenté par le Config Manager, provisioning à chaud) |
+
+> Pour un démarrage sans Config Manager (dev local, liste de tenants figée), le profil
+> `multiSchema` seul suffit : les tenants sont alors ceux déclarés dans `schema-configuration.schemas`.
+
+### Étape 3 — Configurer les schémas
 
 ```yaml
 schema-configuration:
   multiple-schema: true
+
   default-schema:
-    schema-name: "default_schema"
+    schema-name: "public"
     contexts: ["default"]
-    liquibase-enabled: true
+    liquibase-enabled: false
     exclude-paths-filter: []
-  include-default-schema-in-scheduling: true
+
+  # Tenants statiques (optionnel — en mode multitenant, le registre
+  # du Config Manager alimente la liste dynamiquement)
   schemas:
     - schema-name: "tenant_a"
       contexts: ["tenant_a"]
       liquibase-enabled: true
-      exclude-paths-filter: ["/actuator", "/swagger"]
-    - schema-name: "tenant_b"
-      contexts: ["tenant_b"]
-      liquibase-enabled: true
       exclude-paths-filter: []
-  exclude-tables-for-migration:
-    - "databasechangelog"
-    - "databasechangeloglock"
+
+  # Chemins HTTP qui ne nécessitent pas de tenant (login, pages publiques…)
+  filters:
+    exclude-paths-filter:
+      - "/auth/**"
 ```
 
-**Propriétés principales :**
-- `multiple-schema` : Active le mode multi-schéma
-- `schemas` : Liste des configurations de schémas avec leurs contextes
-- `default-schema` : Configuration du schéma par défaut
-- `include-default-schema-in-scheduling` : Inclut le schéma par défaut dans l'exécution des tâches planifiées `@TenantScheduled` (par défaut `true`). Mettre à `false` pour que les tâches planifiées ne s'exécutent que sur les schémas tenant réels.
-- `exclude-tables-for-migration` : Tables à exclure lors des migrations
+Les exclusions techniques (`/actuator/**`, swagger, api-docs) sont ajoutées automatiquement.
 
-#### Configuration Spécifique par Tenant (`@TenantConfigurationProperties`)
-Pour gérer les configurations qui varient d'un tenant à l'autre (ex: des paramètres fonctionnels), la bibliothèque fournit l'annotation `@TenantConfigurationProperties`.
+### Étape 4 — (mode `multitenant`) Brancher le Config Manager
 
-Elle remplace `@ConfigurationProperties` pour ces cas d'usage. Ces beans de configuration ne peuvent pas être injectés directement. Il faut passer par le `TenantConfigurationRegistry` pour récupérer l'instance correspondant au tenant courant.
+Le registre des tenants est chargé au démarrage depuis un serveur de configuration,
+puis rafraîchi périodiquement :
 
-### 3. Configuration des Fonctionnalités Spécifiques
+```yaml
+spring:
+  config:
+    import: optional:configserver:http://localhost:8090/api/config/v1
 
-#### Verrouillage Distribué (ShedLock)
-Pour activer ShedLock dans un contexte multi-tenant :
-
-```properties
-jpa.shedlock.enabled=true
+multitenant:
+  config-manager:
+    base-url: http://localhost:8090
+    auto-create-application: true   # crée l'application côté Config Manager si absente
+    fail-fast: false                # true = échec au démarrage si Config Manager indisponible
 ```
 
-La configuration active automatiquement :
-- `@EnableScheduling` et `@EnableSchedulerLock` avec un timeout par défaut de 2 minutes
-- Un `LockProvider` qui utilise la base de données avec sélection de schéma automatique
-- L'isolation des verrous par tenant (chaque tenant a ses verrous dans son propre schéma)
+### Étape 5 — Appeler votre API
 
-#### Exemple d'utilisation des tâches planifiées
-```java
-@Component
-public class MyScheduledTasks {
-    
-    @TenantScheduled(scheduled = @Scheduled(fixedRate = 60000))
-    @SchedulerLock(name = "processData", lockAtMostFor = "50s", lockAtLeastFor = "10s")
-    public void processDataForAllTenants() {
-        // Cette méthode s'exécutera pour chaque tenant
-        // Le contexte tenant sera automatiquement défini
-        // ShedLock garantit qu'une seule instance s'exécute par tenant
-    }
-}
+```bash
+curl http://localhost:8080/api/documents -H "X-TENANT: tenant_a"
 ```
 
-## Fonctionnalités Détaillées
+Toutes les requêtes JPA de ce traitement s'exécutent dans le schéma `tenant_a`. C'est terminé
+pour le cas nominal — la suite de ce document couvre les canaux asynchrones, la résolution
+personnalisée du tenant (JWT…) et le cycle de vie des tenants.
 
-### API REST & Feign
+---
 
-Deux modes de résolution du tenant à l'entrée HTTP, pilotés par `multitenant.filter.mode` :
+## 3. Concepts clés
 
-#### Mode `legacy` (défaut)
-- **`TenantFilter`** : Ce filtre intercepte toutes les requêtes HTTP entrantes. Il lit l'en-tête `X-TENANT` pour initialiser le `TenantContext`. Il gère également une liste d'URL à exclure (comme les endpoints Actuator ou Swagger) configurable via les propriétés de l'application. Le nettoyage du contexte est garanti dans un bloc `finally`.
+### Tenant
 
-#### Mode `resolver` (SPI extensible, recommandé pour les nouvelles intégrations)
+Une entité isolée de l'application (un client, une organisation…), identifiée par un UUID,
+un **nom** (celui que transportent les headers et les messages) et un **nom de schéma**
+PostgreSQL (le nom en minuscules — les schémas sont toujours lowercase, `^[0-9a-z_]+$`).
 
-Pour les applications dont le tenant ne peut pas être résolu par un simple header (claim JWT,
-sous-domaine, segment d'URL…), le mode `resolver` remplace le `TenantFilter` par deux filtres
-pilotés par des SPI que l'application peut implémenter :
+### TenantContext
 
-- **`TenantResolver`** (SPI) : identifie le tenant d'une requête. Tous les beans `TenantResolver`
-  sont interrogés par ordre croissant (`getOrder()`), le premier résultat non vide gagne.
-  La librairie fournit uniquement `HeaderTenantResolver` (`X-TENANT`, ordre -100) — elle est
-  **agnostique du fournisseur d'identité** : c'est l'application qui déclare, si besoin, un
-  résolveur basé sur son IdP (claim JWT, etc.).
-- **`TenantAccessValidator`** (SPI) : décide, une fois l'authentification faite, si l'appelant
-  a le droit d'opérer sur le tenant résolu : `proceed()`, `proceedWithoutTenant()` (endpoint
-  public / appelant plateforme) ou `reject(status, message)`. Sans bean applicatif, le
-  validateur par défaut exige un tenant (400 sinon), comme le mode legacy.
-- **`TenantResolutionFilter`** (pré-auth, ordre `multitenant.filter.pre-auth-order`, défaut -200) :
-  positionne le contexte en *best-effort* **avant Spring Security**, afin que les accès BDD
-  réalisés pendant l'authentification (ex. résolution de permissions par rôle) s'exécutent sur
-  le bon schéma. Ne rejette jamais une requête.
-- **`TenantEnforcementFilter`** (post-auth, ordre `multitenant.filter.enforcement-order`, défaut 10) :
-  ré-exécute la chaîne de résolveurs avec le `SecurityContext` peuplé, applique la décision du
-  `TenantAccessValidator`, vérifie l'existence du tenant dans le registre (403 sinon) et
-  positionne le contexte. Nettoyage garanti en `finally`.
+Le cœur du système : un conteneur `ThreadLocal` qui détient le tenant courant pendant toute
+la durée d'un traitement. Il est posé aux points d'entrée (filtre HTTP, consommateur de message,
+tâche planifiée) et **systématiquement nettoyé en `finally`** pour éviter qu'un tenant ne
+« colle » à un thread de pool.
+
+Règle d'or : **le code applicatif ne manipule jamais `TenantContext` directement.**
+Pour exécuter du code au nom d'un tenant précis, utilisez [`TenantExecutor`](#6-tenantexecutor--exécution-cross-tenant).
+
+### TenantConfigurationRegistry
+
+Le registre en mémoire de tous les tenants connus et de leurs propriétés. En mode `multitenant`
+il est peuplé depuis le Config Manager (au démarrage puis par rafraîchissement périodique) ;
+en mode `multiSchema` seul, il reflète les schémas statiques de la configuration.
+
+### Cycle de vie d'une requête HTTP
+
+```
+1. Filtre(s) de la librairie : identification du tenant  →  TenantContext posé
+2. Spring Security : authentification (les accès BDD utilisent déjà le bon schéma)
+3. Contrôleur → services → repositories : transparents
+4. Fin de requête : TenantContext nettoyé (finally), même en cas d'exception
+```
+
+---
+
+## 4. Résolution du tenant HTTP
+
+**Comment la librairie sait-elle à quel tenant appartient une requête ?**
+Deux modes, pilotés par `multitenant.filter.mode` :
+
+### Mode `legacy` (défaut) — header `X-TENANT`
+
+Un filtre unique (`TenantFilter`) lit le header `X-TENANT`, vérifie que le tenant existe
+(registre ou schémas configurés) et pose le contexte. Requête sans header sur un chemin
+non exclu → **400**. Simple et suffisant quand vos clients envoient toujours le header
+(gateway, front dédié, appels M2M).
+
+### Mode `resolver` — SPI extensible (recommandé)
+
+À activer dès que le tenant ne peut pas être déduit d'un simple header : claim JWT,
+sous-domaine, segment d'URL, certificat client… **et** dès que vous avez besoin de règles
+d'autorisation (« cet appelant a-t-il le droit d'opérer sur ce tenant ? »).
 
 ```yaml
 multitenant:
   filter:
     mode: resolver
-    pre-auth-exclude-paths:      # chemins ignorés par le filtre pré-auth
-      - /platform/**
-# Les chemins exclus de l'enforcement restent pilotés par :
-schema-configuration:
-  filters:
-    exclude-paths-filter:
-      - /auth/**
-      - /platform/**
 ```
 
-Exemple de résolveur applicatif (JWT — la librairie n'impose aucun IdP) :
+La librairie enregistre alors **deux filtres** :
+
+| Filtre | Ordre servlet | Rôle |
+|---|---|---|
+| `TenantResolutionFilter` | `-200` (avant Spring Security) | Pose le contexte en *best-effort*, sans jamais rejeter. Indispensable si votre couche sécurité fait des requêtes BDD **pendant** l'authentification (résolution de permissions par rôle, chargement d'utilisateur) : ces requêtes ciblent ainsi déjà le bon schéma. |
+| `TenantEnforcementFilter` | `10` (après Spring Security) | Ré-identifie le tenant avec le `SecurityContext` peuplé, applique votre politique d'accès, vérifie l'existence du tenant (sinon **403**), pose le contexte. Nettoyage garanti en `finally`. |
+
+Ces deux filtres délèguent à deux SPI que **vous** implémentez (ou pas — des défauts existent) :
+
+#### SPI n° 1 : `TenantResolver` — « quel est le tenant de cette requête ? »
+
+Tous les beans `TenantResolver` du contexte sont interrogés **par ordre croissant**
+(`getOrder()`) ; le premier résultat non vide gagne.
+
+La librairie fournit un seul résolveur : `HeaderTenantResolver` (header `X-TENANT`,
+normalisé en minuscules, ordre `-100` — donc prioritaire). Elle est **agnostique du
+fournisseur d'identité** : si votre tenant vit dans un JWT, c'est vous qui l'exprimez.
 
 ```java
+/**
+ * Exemple : résout le tenant depuis un claim JWT.
+ * Attention : ce résolveur peut être appelé AVANT Spring Security (filtre pré-auth).
+ * Il ne doit donc pas supposer que le SecurityContext est peuplé — dans ce cas,
+ * décoder le payload du JWT sans valider la signature est acceptable : la signature
+ * sera validée par Spring Security juste après, et le filtre post-auth re-validera tout.
+ */
 @Component
 public class MyJwtTenantResolver implements TenantResolver {
+
     @Override
     public Optional<String> resolveTenantName(HttpServletRequest request) {
-        // extraire l'organisation du JWT (SecurityContext si peuplé, sinon décodage du payload)
-        return Optional.ofNullable(extractOrganization(request));
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth instanceof JwtAuthenticationToken jwtAuth) {
+            // Post-authentification : claim validé
+            return Optional.ofNullable(jwtAuth.getToken().getClaimAsString("tenant"));
+        }
+        // Pré-authentification : décodage best-effort du payload brut
+        return decodeTenantFromRawBearer(request);
     }
+
     @Override
-    public int getOrder() { return 0; } // après HeaderTenantResolver (-100)
+    public int getOrder() {
+        return 0; // après HeaderTenantResolver (-100) : un header explicite gagne toujours
+    }
 }
 ```
 
-#### Appels sortants
-- **`TenantFeignInterceptor`** : Pour les appels sortants vers d'autres microservices, cet intercepteur ajoute automatiquement l'en-tête `X-TENANT`, assurant une propagation transparente du contexte.
+Contrat d'un résolveur : retourner le **nom du tenant** (pas le schéma), `Optional.empty()`
+si la stratégie ne s'applique pas, et **ne jamais lever d'exception** pour un simple échec
+de résolution.
+
+#### SPI n° 2 : `TenantAccessValidator` — « cet appelant a-t-il le droit ? »
+
+Appelé une seule fois par requête, **après** authentification, avec le tenant résolu
+(ou `null`). Trois décisions possibles :
+
+```java
+@Component
+public class MyTenantAccessValidator implements TenantAccessValidator {
+
+    @Override
+    public TenantAccessDecision validate(HttpServletRequest request, String tenantName) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+
+        if (isPlatformAdmin(auth)) {
+            // Un admin plateforme doit cibler explicitement un tenant (X-TENANT)
+            return tenantName != null
+                    ? TenantAccessDecision.proceed()
+                    : TenantAccessDecision.reject(403, "Header X-TENANT requis");
+        }
+        if (auth != null && !belongsTo(auth, tenantName)) {
+            return TenantAccessDecision.reject(403, "Tenant non autorisé pour cet utilisateur");
+        }
+        if (tenantName == null) {
+            // Endpoint public : on laisse passer sans tenant
+            return TenantAccessDecision.proceedWithoutTenant();
+        }
+        return TenantAccessDecision.proceed();
+    }
+}
+```
+
+Sans bean applicatif, le défaut (`RequireTenantAccessValidator`) exige un tenant et rejette
+en 400 — le même contrat que le mode `legacy`.
+
+#### Configuration du mode `resolver`
+
+```yaml
+multitenant:
+  filter:
+    mode: resolver
+    pre-auth-enabled: true          # filtre best-effort avant Spring Security
+    pre-auth-order: -200
+    pre-auth-exclude-paths:         # chemins ignorés par le filtre pré-auth
+      - "/platform/**"              #   (ex. endpoints cross-tenant d'administration)
+    enforcement-order: 10
+    header-resolver-enabled: true   # false pour désactiver le résolveur X-TENANT fourni
+
+schema-configuration:
+  filters:
+    exclude-paths-filter:           # chemins exclus du filtre d'ENFORCEMENT
+      - "/auth/**"                  #   (les exclusions actuator/swagger sont automatiques)
+      - "/public/**"
+```
+
+> Les patterns sont des AntPath évalués contre le **servletPath** (sans le context-path).
+
+#### Migration `legacy` → `resolver`
+
+Le mode `legacy` reste le défaut : les applications existantes ne changent rien.
+Pour migrer : passer `multitenant.filter.mode=resolver` — sans autre changement, le
+comportement est identique au legacy (résolveur header + validateur « tenant obligatoire »).
+Ajoutez ensuite vos propres résolveur(s)/validateur au fil des besoins.
+
+---
+
+## 5. Propagation automatique du contexte
+
+Une fois le contexte posé, la librairie le transporte sur tous les canaux. **Aucun code
+applicatif n'est nécessaire** — cette section documente ce qui se passe sous le capot.
+
+| Canal | Mécanisme | Composant |
+|---|---|---|
+| JPA / Hibernate | `SET search_path` par connexion (stratégie SCHEMA) | `SchemaBasedMultiTenantConnectionProvider` |
+| `@Async`, Spring Modulith | `TaskDecorator` qui recopie le contexte sur le thread du pool | `TenantAsyncConfig` |
+| Kafka | En-tête de message `tenant` (production ET consommation) | `MultitenantKafkaMessageConverter`, `TenantKafkaRecordInterceptor` |
+| JMS | Propriété de message `tenant` | `TenantMappingJackson2MessageConverter` |
+| Feign (appels sortants) | Header `X-TENANT` ajouté automatiquement | `TenantFeignInterceptor` |
+| Cache Spring | Clés préfixées par le tenant | `multitenantKeyGenerator` |
+| Événements Spring | Wrapping de l'événement avec son tenant | `MultiTenantEventPublisherProxy`, `MultitenantEventDispatcher` |
+| Tâches planifiées | Une exécution **par tenant**, contexte posé | `@TenantScheduled` |
+| Verrous distribués | Table ShedLock **dans le schéma du tenant** | `ShedlockJpaConfig` |
+
+Quelques points d'attention par canal :
+
+### `@Async`
+
+`TenantAsyncConfig` fournit l'`AsyncConfigurer` (threads `tenant-async-*`). Si vous déclarez
+votre propre `AsyncConfigurer`, celui de la librairie s'efface (`@ConditionalOnMissingBean`) —
+pensez alors à recopier le contexte vous-même via un `TaskDecorator`.
 
 ### Kafka
-La propagation du contexte dans un environnement asynchrone est gérée de manière robuste :
 
-- **`MultitenantKafkaMessageConverter`** :
-  - À la **production**, il enrichit chaque message Kafka avec l'en-tête `tenant` issus du `TenantContext`.
-  - À la **consommation**, il lit cet en-tête pour reconstituer et initialiser le `TenantContext` avant que le message ne soit traité par le listener.
-- **`TenantKafkaRecordInterceptor`** : C'est une pièce de sécurité essentielle. Cet intercepteur garantit que `tenantContext.clear()` est appelé après **chaque** traitement de message, que celui-ci ait réussi (`success`) ou échoué (`failure`). Cela prévient les fuites de contexte critiques dans le pool de threads des consommateurs Kafka.
+Le nettoyage du contexte après **chaque** message (succès ou échec) est garanti par
+`TenantKafkaRecordInterceptor` — indispensable avec les pools de threads des consommateurs.
 
-### Base de Données (JPA/Hibernate)
-La bibliothèque configure Hibernate pour utiliser la stratégie `SCHEMA`. Une fois le `TenantContext` initialisé, toutes les requêtes JPA/Hibernate sont automatiquement dirigées vers le bon schéma de base de données (ex: `etablissement_a_active`).
+### Cache
 
-#### Stratégie de nommage physique (Physical Naming Strategy)
+Utilisez le générateur fourni dans vos annotations :
 
-La configuration JPA (`TenantJpaConfig`) utilise `putIfAbsent` pour la propriété `hibernate.physical_naming_strategy`. Cela signifie que **l'application consommatrice peut choisir sa propre stratégie** en la déclarant dans ses propriétés :
+```java
+@Cacheable(value = "documents", keyGenerator = "multitenantKeyGenerator")
+public Document find(String id) { ... }
+```
+
+### Tâches planifiées
+
+`@TenantScheduled` remplace `@Scheduled` : la méthode s'exécute une fois **par tenant**,
+avec le contexte posé. Combinez avec `@SchedulerLock` (ShedLock) pour garantir une seule
+exécution par tenant en environnement multi-instances :
+
+```java
+@TenantScheduled(scheduled = @Scheduled(fixedRate = 60000))
+@SchedulerLock(name = "processData", lockAtMostFor = "50s")
+public void processDataForAllTenants() {
+    // exécutée pour chaque tenant, dans son schéma, verrou isolé par schéma
+}
+```
+
+```yaml
+jpa:
+  shedlock:
+    enabled: true          # active ShedLock multi-tenant
+
+schema-configuration:
+  include-default-schema-in-scheduling: false   # exclure le schéma par défaut des exécutions
+```
+
+### Événements Spring
+
+Les événements publiés pendant un traitement tenant-scopé sont automatiquement enveloppés
+avec leur tenant et dé-enveloppés côté listener — y compris à travers `@Async`.
+
+### Physical naming strategy (Hibernate)
+
+La librairie ne l'impose pas (`putIfAbsent`) : déclarez la vôtre si votre base est en snake_case :
 
 ```yaml
 spring:
   jpa:
     properties:
       hibernate:
-        # Conversion automatique camelCase → snake_case (recommandé si la BDD utilise snake_case)
         physical_naming_strategy: org.hibernate.boot.model.naming.CamelCaseToUnderscoresNamingStrategy
 ```
 
-Si aucune stratégie n'est déclarée par l'application, la valeur par défaut est `PhysicalNamingStrategyStandardImpl` (pas de conversion — les noms de champs Java sont utilisés tels quels comme noms de colonnes).
+---
 
-### Méthodes Asynchrones (@Async)
+## 6. `TenantExecutor` — exécution cross-tenant
 
-La bibliothèque fournit une propagation automatique du `TenantContext` vers les threads asynchrones via `TenantAsyncConfig` :
-
-- **`TenantAsyncConfig`** : Implémente `AsyncConfigurer` pour que Spring utilise un `ThreadPoolTaskExecutor` avec un `TaskDecorator` qui capture et restaure le tenant courant.
-- **Couverture** : Toutes les méthodes `@Async`, y compris Spring Modulith (`@ApplicationModuleListener`), héritent automatiquement du `TenantContext` du thread appelant.
-- **Surcharge** : L'application consommatrice peut déclarer son propre bean `AsyncConfigurer` — dans ce cas `TenantAsyncConfig` est ignorée (`@ConditionalOnMissingBean`).
-- **Thread prefix** : Les threads asynchrones sont nommés `tenant-async-*` pour faciliter le debugging.
-
-### Cache (Spring Cache)
-Lorsque le cache Spring est activé, la bibliothèque fournit un `multitenantKeyGenerator`. En l'utilisant dans vos annotations `@Cacheable`, les clés de cache sont automatiquement préfixées avec l'identifiant du tenant, garantissant une isolation parfaite des données en cache.
-
-### Tâches Planifiées (Scheduled Tasks)
-La bibliothèque étend le système de planification Spring pour supporter la multi-tenancy :
-
-- **`@TenantScheduled`** : Cette annotation remplace `@Scheduled` pour les tâches qui doivent s'exécuter dans un contexte multi-tenant. Elle encapsule l'annotation `@Scheduled` standard.
-- **`TenantScheduledAnnotationBeanPostProcessor`** : Ce processeur détecte les méthodes annotées avec `@TenantScheduled` et crée automatiquement une instance de tâche par tenant si le mode multi-schéma est actif.
-- **`TenantScheduledMethodRunnable`** : Runnable spécialisé qui capture le contexte du tenant au moment de la création de la tâche et le restaure lors de l'exécution, garantissant que chaque exécution se fait dans le bon contexte.
-- **Exclusion du schéma par défaut** : En définissant `schema-configuration.include-default-schema-in-scheduling=false`, les tâches planifiées ne s'exécuteront que sur les schémas tenant réels (organisations), excluant le schéma par défaut (ex: `public`).
-
-```yaml
-# Pour exclure le schéma par défaut des tâches planifiées :
-schema-configuration:
-  include-default-schema-in-scheduling: false
-```
-
-### Messagerie JMS
-Pour la messagerie JMS, la bibliothèque propose des convertisseurs qui propagent automatiquement le contexte tenant :
-
-- **`TenantMappingJackson2MessageConverter`** : Convertisseur principal basé sur Jackson qui :
-  - À l'**envoi** : Vérifie la présence d'un tenant dans le contexte (lance une exception si absent), puis enrichit le message avec la propriété `tenant`
-  - À la **réception** : Lit cette propriété pour reconstituer et initialiser le `TenantContext` avant traitement
-  - Configure automatiquement le type de message en TEXT et utilise `_type` comme propriété d'identification
-
-- **`MultitenantSimpleMessageConverter`** : Convertisseur simple pour les cas d'usage basiques, qui gère uniquement la réception en initialisant le contexte tenant à partir des propriétés du message
-
-- **`TenantJmsConfig`** : Configuration automatique qui active les fonctionnalités JMS multi-tenant :
-  - `queueJmsTemplate` : Template configuré pour les queues avec QoS explicite (priorité 4, TTL 30s)
-  - `topicJmsTemplate` : Template configuré pour les topics (pub/sub)
-  - `jmsListenerContainerFactory` : Factory pour les listeners avec conversion automatique du contexte
-
-- **Activation** : Disponible uniquement avec le profil `multiSchema` et si JMS est présent dans le classpath
-
-### Verrouillage Distribué (ShedLock)
-L'intégration avec ShedLock permet de gérer les verrous distribués dans un environnement multi-tenant :
-
-- **`SchemaSelectedMultitenantDataSource`** : DataSource personnalisé qui sélectionne automatiquement le bon schéma en fonction du contexte tenant courant. Cette classe étend `DelegatingDataSource` et intercepte les connexions pour appliquer la sélection de schéma via `SchemaSelector`.
-- **`ShedlockJpaConfig`** : Configuration automatique qui active ShedLock avec le support multi-tenant. Elle crée un `LockProvider` basé sur JDBC qui utilise le schéma approprié selon le contexte tenant.
-- **Configuration conditionnelle** : Activé uniquement si `jpa.shedlock.enabled=true` est défini dans les propriétés de l'application.
-- **Isolation des verrous** : Chaque tenant dispose de ses propres verrous stockés dans son schéma spécifique, évitant complètement les conflits entre tenants.
-- **Annotations supportées** : Fonctionne avec `@SchedulerLock` sur les méthodes `@TenantScheduled` pour garantir qu'une seule instance d'une tâche planifiée s'exécute à la fois par tenant.
-
-### Événements d'Application
-La gestion des événements Spring est adaptée pour le contexte multi-tenant avec un système sophistiqué de wrapping et de dispatch :
-
-- **`MultiTenantEventPublisherProxy`** : Proxy dynamique qui intercepte tous les appels à `publishEvent()`. Il détecte si un tenant est présent dans le contexte et wrappe automatiquement les `ApplicationEvent` dans un `MultitenantEventWrapper` pour préserver le contexte tenant.
-
-- **`MultitenantEventWrapper<T>`** : Conteneur qui encapsule l'événement original avec le tenant courant et un timestamp. Cette classe permet de transporter le contexte tenant avec l'événement à travers le système d'événements.
-
-- **`MultitenantEventDispatcher`** : Composant central qui gère le dispatch des événements wrappés. Il :
-  - Utilise un `ThreadLocal<Set<Object>>` pour éviter les boucles infinies lors du traitement d'événements
-  - Publie d'abord l'événement wrappé, puis l'événement original avec le contexte tenant défini
-  - Nettoie automatiquement le contexte dans un bloc `finally`
-
-- **`@MultitenantEventListener`** : Annotation qui étend `@EventListener` avec support multi-tenant. Elle offre un attribut `propagateTenant` (true par défaut) pour contrôler la propagation du contexte.
-
-- **`MultitenantListenerAspect`** : Aspect AOP qui intercepte les méthodes annotées avec `@MultitenantEventListener`. Il déwrappe automatiquement les `MultitenantEventWrapper` et défini le contexte tenant avant d'exécuter le listener.
-
-- **Configuration automatique** : Le proxy remplace l'`ApplicationEventPublisher` par défaut via `@Primary` uniquement avec le profil `multiSchema`.
-
-### Exécution Cross-Tenant (`TenantExecutor`)
-
-Pour les traitements plateforme (agrégations, administration, batchs) qui doivent s'exécuter
-sur un tenant précis ou sur tous les tenants, la librairie fournit le bean `TenantExecutor` —
-à utiliser à la place du motif manuel `setCurrentTenant`/`clear` :
+Pour les traitements qui doivent s'exécuter **au nom d'un tenant précis** ou **pour tous les
+tenants** (agrégations d'administration, batchs, migrations, compensation), injectez
+`TenantExecutor` — jamais `TenantContext` :
 
 ```java
+@Service
 @RequiredArgsConstructor
 public class PlatformStatsService {
-    private final TenantExecutor tenantExecutor;
 
+    private final TenantExecutor tenantExecutor;
+    private final DocumentRepository documentRepository;
+
+    /** Agréger une valeur sur tous les tenants. */
     public long countAllDocuments() {
         AtomicLong total = new AtomicLong();
         tenantExecutor.forEachTenant(tenant ->
@@ -333,89 +426,227 @@ public class PlatformStatsService {
         return total.get();
     }
 
-    public DocumentDto findInTenant(String tenantName, UUID id) {
+    /** Exécuter une lecture dans un tenant donné (par nom). */
+    public DocumentDto findInTenant(String tenantName, String id) {
         return tenantExecutor.callAs(tenantName, () -> documentService.get(id));
     }
 }
 ```
 
-Garanties par rapport au motif manuel :
-- le contexte **précédent** est restauré en sortie (les appels imbriqués ne perdent pas le
-  contexte de l'appelant) — restauration assurée par `finally`, même sur exception ;
-- `forEachTenant` continue sur les tenants suivants si l'un d'eux échoue (erreur loggée) ;
-- `forEachSchedulableTenant` respecte `schema-configuration.include-default-schema-in-scheduling`.
+| Méthode | Usage |
+|---|---|
+| `runAs(tenant, Runnable)` / `runAs(tenantName, Runnable)` | Exécuter une action au nom d'un tenant |
+| `callAs(tenant, Supplier<T>)` / `callAs(tenantName, Supplier<T>)` | Idem, avec valeur de retour |
+| `forEachTenant(Consumer<Tenant>)` | Itérer sur tous les tenants disponibles |
+| `forEachSchedulableTenant(Consumer<Tenant>)` | Idem, en respectant `include-default-schema-in-scheduling` |
 
-### Provisioning de Tenant à Chaud (Runtime)
+Garanties — c'est ce qui rend `TenantExecutor` supérieur à toute manipulation manuelle du contexte :
 
-La bibliothèque fournit un service de provisioning permettant de créer un nouveau tenant **pendant que l'application tourne** (et non uniquement au démarrage). C'est typiquement utilisé lors de la création d'une nouvelle organisation.
+- le **contexte précédent est restauré** en sortie (un appel imbriqué ou une itération
+  au sein d'une requête tenant-scopée ne perd pas le contexte de l'appelant) ;
+- la restauration passe par un `finally` : elle a lieu **même en cas d'exception** ;
+- `forEachTenant` **continue sur les tenants suivants** si l'un d'eux échoue (erreur loggée).
 
-- **`TenantProvisioningService`** : Interface exposant `provision(tenantId, tenantName)`, `deprovision(tenantName)` et `clearContext()`.
-- **`DefaultTenantProvisioningService`** : Implémentation qui exécute séquentiellement :
-  1. Validation du nom de schéma (alphanumeric + underscore, lowercase)
-  2. `CREATE SCHEMA IF NOT EXISTS` (hors transaction pour visibilité immédiate)
-  3. Exécution des migrations Liquibase sur le nouveau schéma
-  4. Enregistrement du tenant dans le `TenantConfigurationRegistry`
-  5. Positionnement du `TenantContext` sur le nouveau schéma
+---
 
-#### Utilisation
+## 7. Cycle de vie des tenants
+
+### Provisionner un tenant à chaud
+
+`TenantProvisioningService.provision(tenantId, tenantName)` crée un tenant **pendant que
+l'application tourne** :
+
+1. validation du nom de schéma (`^[0-9a-z_]+$`) ;
+2. `CREATE SCHEMA IF NOT EXISTS` (hors transaction — le DDL doit être visible immédiatement) ;
+3. exécution des migrations **Liquibase** sur le nouveau schéma ;
+4. enregistrement dans le `TenantConfigurationRegistry` ;
+5. positionnement du `TenantContext` sur le nouveau tenant, pour que vous puissiez
+   immédiatement créer les données initiales (utilisateur admin, paramètres…).
 
 ```java
+@Service
 @RequiredArgsConstructor
-public class OrganisationService {
-    private final TenantProvisioningService tenantProvisioningService;
+public class CustomerOnboardingService {
 
-    public void createOrganisation(String tenantId, String tenantName) {
+    private final ConfigManagerClient configManagerClient;
+    private final TenantProvisioningService provisioningService;
+
+    public void onboard(String code, String displayName) {
+        String tenantId = null;
+        boolean schemaProvisioned = false;
         try {
-            // Crée le schéma + Liquibase + positionne le TenantContext
-            Tenant tenant = tenantProvisioningService.provision(tenantId, tenantName);
+            // 1. Déclarer le tenant au Config Manager (create-or-get : idempotent)
+            tenantId = configManagerClient.createTenant(code, displayName);
 
-            // Toutes les opérations JPA suivantes utilisent le nouveau schéma
-            userRepository.save(new User("admin@org.com"));
+            // 2. Schéma + Liquibase + registre — le contexte est posé sur le nouveau tenant
+            provisioningService.provision(tenantId, code);
+            schemaProvisioned = true;
+
+            // 3. Données initiales, DANS le nouveau schéma
+            userRepository.save(newAdminUser());
+
+        } catch (Exception ex) {
+            // Compensation : ne détruire que ce qui a été créé
+            if (schemaProvisioned) provisioningService.deprovision(code);
+            if (tenantId != null) configManagerClient.deleteTenant(tenantId);
+            throw ex;
         } finally {
-            tenantProvisioningService.clearContext();
+            provisioningService.clearContext();   // toujours, en finally
         }
     }
 }
 ```
 
-**Points importants :**
-- Après `provision()`, le `TenantContext` reste positionné sur le nouveau tenant. Cela permet d'exécuter des opérations dans le nouveau schéma (création de données initiales, utilisateur admin, etc.).
-- `clearContext()` doit être appelé dans un bloc `finally` une fois les opérations terminées.
-- La méthode est annotée `@Transactional(propagation = NOT_SUPPORTED)` car le DDL (`CREATE SCHEMA`) doit être commité immédiatement pour être visible par Liquibase.
-- Activé automatiquement si Liquibase est dans le classpath et le profil `multiSchema` ou `multitenant` est actif.
+### Dé-provisionner un tenant
 
-#### Dé-provisioning
+`deprovision(tenantName)` est l'opération symétrique : retrait du registre local puis
+`DROP SCHEMA … CASCADE`. **Destructrice et définitive** — réservez-la à la suppression
+d'un tenant ou à la compensation d'un provisioning échoué. Le désenregistrement côté
+Config Manager reste un appel explicite (`configManagerClient.deleteTenant(id)`), car un
+tenant peut exister d'un côté sans exister de l'autre.
 
-`deprovision(tenantName)` supprime définitivement le schéma (`DROP SCHEMA … CASCADE`) et retire
-le tenant du registry local. Opération destructrice, typiquement utilisée pour la suppression
-d'une organisation ou la **compensation** (rollback) d'un provisioning échoué. Le
-désenregistrement côté Config Manager reste explicite via `ConfigManagerClient.deleteTenant`.
+### API Config Manager (`ConfigManagerClient`)
 
-#### Cycle de vie des tenants côté Config Manager
-
-`ConfigManagerClient` expose, en plus de la lecture du registry, les opérations d'écriture
-utilisées par le provisioning applicatif :
+En plus de la lecture du registre (automatique), le client expose le cycle de vie complet :
 
 | Méthode | Rôle |
 |---|---|
-| `createTenant(name, displayName)` | Crée le tenant (sémantique *create-or-get* : retourne l'id existant sur 409) |
-| `listTenants()` / `findTenantIdByName(name)` | Liste / recherche des tenants de l'application |
-| `getTenantProperties(id)` / `updateTenantProperties(id, map)` | Lecture / remplacement des propriétés |
-| `deleteTenant(id)` | Suppression du tenant |
+| `createTenant(name, displayName)` | Crée le tenant — *create-or-get* : retourne l'id existant sur 409 |
+| `listTenants()` / `findTenantIdByName(name)` | Liste / recherche les tenants de l'application |
+| `getTenantProperties(id)` / `updateTenantProperties(id, map)` | Lecture / remplacement des propriétés d'un tenant |
+| `deleteTenant(id)` | Supprime le tenant côté Config Manager |
 
-#### Configuration du Config Manager
+---
 
-```yaml
-multitenant:
-  config-manager:
-    base-url: http://localhost:8090
-    registry-path: /api/config/v1/registry/{applicationName}
-    application-path: /api/config/v1/applications
-    tenants-path: /api/config/v1/tenants
-    auto-create-application: true
-    fail-fast: false
+## 8. Configuration par tenant
+
+Pour les paramètres qui varient d'un tenant à l'autre (quotas, feature flags, plan commercial…),
+remplacez `@ConfigurationProperties` par `@TenantConfigurationProperties` :
+
+```java
+@Data
+@TenantConfigurationProperties(prefix = "billing")
+public class BillingTenantProperties {
+    private String plan = "STARTER";
+    private int maxUsers = 10;
+    private boolean premiumFeaturesEnabled = false;
+}
 ```
 
-## Support Technique
+```java
+// Déclarer le bean prototype — la librairie instancie et peuple UNE copie par tenant
+@Bean
+public BillingTenantProperties billingTenantProperties() {
+    return new BillingTenantProperties();
+}
+```
 
-Pour toute question ou problème d'intégration, consultez la documentation technique des composants ou les exemples d'utilisation fournis dans le dossier `/examples`.
+Les valeurs proviennent des propriétés du tenant sur le Config Manager
+(`billing.plan=BUSINESS`, `billing.max-users=50`, …).
+
+**Ne jamais injecter ces beans directement** (vous obtiendriez une instance arbitraire) —
+passez par le registre, qui sélectionne l'instance du tenant courant :
+
+```java
+@RequiredArgsConstructor
+public class QuotaService {
+    private final TenantConfigurationRegistry registry;
+
+    public void checkQuota() {
+        BillingTenantProperties props = registry.get(BillingTenantProperties.class);
+        if (userRepository.count() >= props.getMaxUsers()) {
+            throw new QuotaExceededException();
+        }
+    }
+}
+```
+
+---
+
+## 9. Référence des propriétés
+
+### `schema-configuration.*` — schémas et filtrage
+
+| Propriété | Défaut | Description |
+|---|---|---|
+| `multiple-schema` | — | Active le mode multi-schéma |
+| `default-schema.schema-name` | `public` | Schéma par défaut (requêtes hors tenant) |
+| `default-schema.liquibase-enabled` | `true` | Migrations Liquibase sur le schéma par défaut |
+| `schemas[]` | `[]` | Tenants statiques : `schema-name`, `contexts`, `liquibase-enabled`, `exclude-paths-filter` |
+| `filters.exclude-paths-filter` | `[]` | Chemins HTTP exclus du filtrage tenant (AntPath sur servletPath) |
+| `include-default-schema-in-scheduling` | `true` | Inclure le schéma par défaut dans `@TenantScheduled` / `forEachSchedulableTenant` |
+| `exclude-tables-for-migration` | changelog Liquibase | Tables exclues des migrations |
+
+### `multitenant.filter.*` — résolution HTTP
+
+| Propriété | Défaut | Description |
+|---|---|---|
+| `mode` | `legacy` | `legacy` (X-TENANT seul) ou `resolver` (SPI) |
+| `pre-auth-enabled` | `true` | Filtre best-effort avant Spring Security (mode resolver) |
+| `pre-auth-order` | `-200` | Ordre servlet du filtre pré-auth |
+| `pre-auth-exclude-paths` | `[]` | Chemins ignorés par le filtre pré-auth |
+| `enforcement-order` | `10` | Ordre servlet du filtre d'enforcement |
+| `header-resolver-enabled` | `true` | Active le résolveur `X-TENANT` fourni |
+
+### `multitenant.config-manager.*` — registre des tenants
+
+| Propriété | Défaut | Description |
+|---|---|---|
+| `base-url` | déduit de `spring.config.import` | URL du Config Manager |
+| `registry-path` | `/api/config/v1/registry/{applicationName}` | Endpoint de lecture du registre |
+| `application-path` | `/api/config/v1/applications` | Endpoint de création d'application / de tenants |
+| `tenants-path` | `/api/config/v1/tenants` | Endpoint des propriétés de tenant |
+| `auto-create-application` | `true` | Crée l'application si le registre renvoie 404 |
+| `fail-fast` | `true` | Échec du démarrage si le Config Manager est injoignable |
+
+### Divers
+
+| Propriété | Défaut | Description |
+|---|---|---|
+| `jpa.shedlock.enabled` | `false` | Active ShedLock multi-tenant (verrous par schéma) |
+| `spring.profiles.active` | — | `multiSchema` et/ou `multitenant` (cf. [Démarrage rapide](#2-démarrage-rapide)) |
+
+---
+
+## 10. Pièges courants et FAQ
+
+**Mon code sécurité fait des requêtes BDD pendant l'authentification et tape le mauvais schéma.**
+C'est le cas d'usage du filtre pré-auth du mode `resolver` : il pose le contexte à l'ordre
+`-200`, avant Spring Security (`-100`). Vérifiez que votre `TenantResolver` sait résoudre
+sans `SecurityContext` (décodage best-effort du JWT brut, header, sous-domaine…).
+
+**Un utilisateur reçoit 400/403 sur un endpoint qui ne devrait pas exiger de tenant.**
+Ajoutez le chemin à `schema-configuration.filters.exclude-paths-filter`. Rappel : les patterns
+s'évaluent sur le **servletPath**, sans le context-path (`/auth/**`, pas `/api/v1/auth/**`).
+
+**Les noms de tenant et de schéma.**
+Le nom du schéma est toujours le nom du tenant en minuscules, limité à `[0-9a-z_]`.
+Normalisez côté résolveur (le `HeaderTenantResolver` fourni le fait déjà).
+
+**Puis-je poser le `TenantContext` moi-même ?**
+Évitez. `TenantExecutor` fait la même chose avec la restauration du contexte précédent et
+le nettoyage en `finally`. Un `setCurrentTenant` sans `clear` dans un pool de threads est
+la première cause de fuite de données entre tenants.
+
+**`InheritableThreadLocal` et threads créés à la main.**
+Le contexte se propage aux threads enfants créés directement (`new Thread()`). Pour les
+**pools** (`@Async`, Kafka, schedulers), la propagation est assurée par les composants de la
+librairie — mais un `ExecutorService` maison créé hors de ces mécanismes ne recevra pas le
+contexte : passez par `TenantExecutor.runAs(...)` dans la tâche soumise.
+
+**Un tenant créé à chaud n'apparaît pas après redémarrage.**
+Le registre en mémoire est reconstruit au démarrage depuis le Config Manager : le tenant doit
+y avoir été déclaré (`ConfigManagerClient.createTenant`) en plus du provisioning du schéma.
+
+**Liquibase : que ne doit PAS contenir mon changelog ?**
+Aucun `schemaName` en dur — la librairie exécute le même changelog sur chaque schéma en
+positionnant `currentSchema` sur la connexion.
+
+**Comment déboguer le routage de schéma ?**
+Passez ces loggers en `TRACE` :
+```yaml
+logging:
+  level:
+    net.atos.digital.multitenant: DEBUG
+    net.atos.digital.multitenant.tenant.hibernate.SchemaBasedMultiTenantConnectionProvider: TRACE
+```
