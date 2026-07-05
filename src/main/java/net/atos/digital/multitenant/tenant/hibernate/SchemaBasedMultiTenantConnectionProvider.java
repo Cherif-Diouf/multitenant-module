@@ -55,7 +55,8 @@ public class SchemaBasedMultiTenantConnectionProvider implements MultiTenantConn
             throw new IllegalArgumentException("Schema name is malformed: " + schemaName);
         }
         try {
-            log.info("selected schema : {}", schemaName);
+            // TRACE : ce log est émis à chaque acquisition de connexion — en INFO il noie les logs applicatifs.
+            log.trace("selected schema : {}", schemaName);
             // rendre accessible la base de données du tenant
             PreparedStatement preparedStatement = connection.prepareStatement(schemaSelector.apply(schemaName));
             preparedStatement.execute();
