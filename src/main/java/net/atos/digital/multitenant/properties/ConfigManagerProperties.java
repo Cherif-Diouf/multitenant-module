@@ -25,6 +25,11 @@ public class ConfigManagerProperties {
     private String applicationPath = "/api/config/v1/applications";
 
     /**
+     * Relative or absolute base URL of tenant resources (properties read/write).
+     */
+    private String tenantsPath = "/api/config/v1/tenants";
+
+    /**
      * If true, the library creates the application when registry returns 404.
      */
     private boolean autoCreateApplication = true;

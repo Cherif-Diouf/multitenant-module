@@ -80,6 +80,31 @@ public class DefaultTenantProvisioningService implements TenantProvisioningServi
     }
 
     @Override
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public void deprovision(String tenantName) {
+        String schemaName = tenantName.toLowerCase();
+        validateSchemaName(schemaName);
+
+        // 1. Nettoyer le contexte s'il pointe sur le tenant supprimé
+        Tenant current = tenantContext.getCurrentTenant();
+        if (current != null && current.schemaName().equalsIgnoreCase(schemaName)) {
+            tenantContext.clear();
+        }
+
+        // 2. Retirer le tenant du registry local
+        tenantConfigurationRegistry.getTenants()
+                .removeIf(t -> t.tenantName().equalsIgnoreCase(tenantName));
+        tenantConfigurationRegistry.getPropertiesPerTenant().remove(schemaName);
+        tenantConfigurationRegistry.getConfigs().remove(tenantName);
+
+        // 3. Supprimer le schéma PostgreSQL
+        log.warn("Deprovisioning schema '{}' (DROP SCHEMA ... CASCADE)...", schemaName);
+        schemaAdmin.dropSchemaIfExists(schemaName);
+
+        log.info("Schema '{}' deprovisioned successfully.", schemaName);
+    }
+
+    @Override
     public void clearContext() {
         tenantContext.clear();
     }

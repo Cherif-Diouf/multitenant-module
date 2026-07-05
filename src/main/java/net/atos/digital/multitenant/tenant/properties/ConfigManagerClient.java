@@ -7,11 +7,17 @@ import org.springframework.boot.context.config.ConfigDataLocation;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpMethod;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import java.net.URI;
 import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 @Slf4j
 @Component
 public class ConfigManagerClient {
@@ -81,6 +87,86 @@ public class ConfigManagerClient {
             throw clientError;
         }
     }
+    // ── Cycle de vie des tenants (écriture) ─────────────────────────────────
+
+    /**
+     * Crée un tenant pour l'application courante sur le config-manager.
+     * Sémantique « create-or-get » : si le tenant existe déjà (409), son identifiant
+     * existant est retourné.
+     *
+     * @return l'identifiant du tenant côté config-manager
+     */
+    public String createTenant(String tenantName, String displayName) {
+        Map<String, String> body = Map.of(
+                "tenantName", tenantName,
+                "displayName", displayName != null ? displayName : tenantName);
+        try {
+            Map<String, Object> response = restTemplate.exchange(
+                    tenantsCollectionUrl(), HttpMethod.POST, new HttpEntity<>(body),
+                    new ParameterizedTypeReference<Map<String, Object>>() {
+                    }).getBody();
+            String tenantId = response != null ? Objects.toString(response.get("id"), null) : null;
+            log.info("Config-manager tenant created: name={}, id={}", tenantName, tenantId);
+            return tenantId;
+        } catch (HttpClientErrorException.Conflict conflict) {
+            log.info("Config-manager tenant '{}' already exists — returning existing id.", tenantName);
+            String existingId = findTenantIdByName(tenantName);
+            if (existingId == null) {
+                throw new IllegalStateException(
+                        "Tenant '" + tenantName + "' reported as existing (409) but not found via the API");
+            }
+            return existingId;
+        }
+    }
+
+    /** Liste les tenants de l'application courante ({@code id}, {@code tenantName}, …). */
+    public List<Map<String, Object>> listTenants() {
+        List<Map<String, Object>> tenants = restTemplate.exchange(
+                tenantsCollectionUrl(), HttpMethod.GET, null,
+                new ParameterizedTypeReference<List<Map<String, Object>>>() {
+                }).getBody();
+        return tenants != null ? tenants : Collections.emptyList();
+    }
+
+    /** Retourne l'identifiant du tenant portant ce nom, ou {@code null} s'il n'existe pas. */
+    public String findTenantIdByName(String tenantName) {
+        return listTenants().stream()
+                .filter(t -> tenantName.equals(t.get("tenantName")))
+                .map(t -> Objects.toString(t.get("id"), null))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** Lit les propriétés (clé/valeur) d'un tenant. */
+    public Map<String, String> getTenantProperties(String tenantId) {
+        Map<String, String> propertiesMap = restTemplate.exchange(
+                tenantPropertiesUrl(tenantId), HttpMethod.GET, null,
+                new ParameterizedTypeReference<Map<String, String>>() {
+                }).getBody();
+        return propertiesMap != null ? propertiesMap : Collections.emptyMap();
+    }
+
+    /** Remplace les propriétés (clé/valeur) d'un tenant. */
+    public void updateTenantProperties(String tenantId, Map<String, String> tenantProperties) {
+        Map<String, Object> body = Map.of("properties", tenantProperties);
+        restTemplate.put(tenantPropertiesUrl(tenantId), body);
+        log.info("Config-manager tenant properties updated: tenantId={}", tenantId);
+    }
+
+    /** Supprime un tenant de l'application courante sur le config-manager. */
+    public void deleteTenant(String tenantId) {
+        restTemplate.delete(tenantsCollectionUrl() + "/" + tenantId);
+        log.info("Config-manager tenant deleted: id={}", tenantId);
+    }
+
+    private String tenantsCollectionUrl() {
+        return resolveUrl(properties.getApplicationPath()) + "/" + applicationName + "/tenants";
+    }
+
+    private String tenantPropertiesUrl(String tenantId) {
+        return resolveUrl(properties.getTenantsPath()) + "/" + tenantId + "/properties";
+    }
+
     private String resolveRegistryUrl() {
         return resolveUrl(properties.getRegistryPath());
     }

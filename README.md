@@ -157,7 +157,66 @@ public class MyScheduledTasks {
 ## Fonctionnalités Détaillées
 
 ### API REST & Feign
+
+Deux modes de résolution du tenant à l'entrée HTTP, pilotés par `multitenant.filter.mode` :
+
+#### Mode `legacy` (défaut)
 - **`TenantFilter`** : Ce filtre intercepte toutes les requêtes HTTP entrantes. Il lit l'en-tête `X-TENANT` pour initialiser le `TenantContext`. Il gère également une liste d'URL à exclure (comme les endpoints Actuator ou Swagger) configurable via les propriétés de l'application. Le nettoyage du contexte est garanti dans un bloc `finally`.
+
+#### Mode `resolver` (SPI extensible, recommandé pour les nouvelles intégrations)
+
+Pour les applications dont le tenant ne peut pas être résolu par un simple header (claim JWT,
+sous-domaine, segment d'URL…), le mode `resolver` remplace le `TenantFilter` par deux filtres
+pilotés par des SPI que l'application peut implémenter :
+
+- **`TenantResolver`** (SPI) : identifie le tenant d'une requête. Tous les beans `TenantResolver`
+  sont interrogés par ordre croissant (`getOrder()`), le premier résultat non vide gagne.
+  La librairie fournit uniquement `HeaderTenantResolver` (`X-TENANT`, ordre -100) — elle est
+  **agnostique du fournisseur d'identité** : c'est l'application qui déclare, si besoin, un
+  résolveur basé sur son IdP (claim JWT, etc.).
+- **`TenantAccessValidator`** (SPI) : décide, une fois l'authentification faite, si l'appelant
+  a le droit d'opérer sur le tenant résolu : `proceed()`, `proceedWithoutTenant()` (endpoint
+  public / appelant plateforme) ou `reject(status, message)`. Sans bean applicatif, le
+  validateur par défaut exige un tenant (400 sinon), comme le mode legacy.
+- **`TenantResolutionFilter`** (pré-auth, ordre `multitenant.filter.pre-auth-order`, défaut -200) :
+  positionne le contexte en *best-effort* **avant Spring Security**, afin que les accès BDD
+  réalisés pendant l'authentification (ex. résolution de permissions par rôle) s'exécutent sur
+  le bon schéma. Ne rejette jamais une requête.
+- **`TenantEnforcementFilter`** (post-auth, ordre `multitenant.filter.enforcement-order`, défaut 10) :
+  ré-exécute la chaîne de résolveurs avec le `SecurityContext` peuplé, applique la décision du
+  `TenantAccessValidator`, vérifie l'existence du tenant dans le registre (403 sinon) et
+  positionne le contexte. Nettoyage garanti en `finally`.
+
+```yaml
+multitenant:
+  filter:
+    mode: resolver
+    pre-auth-exclude-paths:      # chemins ignorés par le filtre pré-auth
+      - /platform/**
+# Les chemins exclus de l'enforcement restent pilotés par :
+schema-configuration:
+  filters:
+    exclude-paths-filter:
+      - /auth/**
+      - /platform/**
+```
+
+Exemple de résolveur applicatif (JWT — la librairie n'impose aucun IdP) :
+
+```java
+@Component
+public class MyJwtTenantResolver implements TenantResolver {
+    @Override
+    public Optional<String> resolveTenantName(HttpServletRequest request) {
+        // extraire l'organisation du JWT (SecurityContext si peuplé, sinon décodage du payload)
+        return Optional.ofNullable(extractOrganization(request));
+    }
+    @Override
+    public int getOrder() { return 0; } // après HeaderTenantResolver (-100)
+}
+```
+
+#### Appels sortants
 - **`TenantFeignInterceptor`** : Pour les appels sortants vers d'autres microservices, cet intercepteur ajoute automatiquement l'en-tête `X-TENANT`, assurant une propagation transparente du contexte.
 
 ### Kafka
@@ -256,11 +315,41 @@ La gestion des événements Spring est adaptée pour le contexte multi-tenant av
 
 - **Configuration automatique** : Le proxy remplace l'`ApplicationEventPublisher` par défaut via `@Primary` uniquement avec le profil `multiSchema`.
 
+### Exécution Cross-Tenant (`TenantExecutor`)
+
+Pour les traitements plateforme (agrégations, administration, batchs) qui doivent s'exécuter
+sur un tenant précis ou sur tous les tenants, la librairie fournit le bean `TenantExecutor` —
+à utiliser à la place du motif manuel `setCurrentTenant`/`clear` :
+
+```java
+@RequiredArgsConstructor
+public class PlatformStatsService {
+    private final TenantExecutor tenantExecutor;
+
+    public long countAllDocuments() {
+        AtomicLong total = new AtomicLong();
+        tenantExecutor.forEachTenant(tenant ->
+                total.addAndGet(documentRepository.count()));
+        return total.get();
+    }
+
+    public DocumentDto findInTenant(String tenantName, UUID id) {
+        return tenantExecutor.callAs(tenantName, () -> documentService.get(id));
+    }
+}
+```
+
+Garanties par rapport au motif manuel :
+- le contexte **précédent** est restauré en sortie (les appels imbriqués ne perdent pas le
+  contexte de l'appelant) — restauration assurée par `finally`, même sur exception ;
+- `forEachTenant` continue sur les tenants suivants si l'un d'eux échoue (erreur loggée) ;
+- `forEachSchedulableTenant` respecte `schema-configuration.include-default-schema-in-scheduling`.
+
 ### Provisioning de Tenant à Chaud (Runtime)
 
 La bibliothèque fournit un service de provisioning permettant de créer un nouveau tenant **pendant que l'application tourne** (et non uniquement au démarrage). C'est typiquement utilisé lors de la création d'une nouvelle organisation.
 
-- **`TenantProvisioningService`** : Interface exposant `provision(tenantId, tenantName)` et `clearContext()`.
+- **`TenantProvisioningService`** : Interface exposant `provision(tenantId, tenantName)`, `deprovision(tenantName)` et `clearContext()`.
 - **`DefaultTenantProvisioningService`** : Implémentation qui exécute séquentiellement :
   1. Validation du nom de schéma (alphanumeric + underscore, lowercase)
   2. `CREATE SCHEMA IF NOT EXISTS` (hors transaction pour visibilité immédiate)
@@ -295,6 +384,25 @@ public class OrganisationService {
 - La méthode est annotée `@Transactional(propagation = NOT_SUPPORTED)` car le DDL (`CREATE SCHEMA`) doit être commité immédiatement pour être visible par Liquibase.
 - Activé automatiquement si Liquibase est dans le classpath et le profil `multiSchema` ou `multitenant` est actif.
 
+#### Dé-provisioning
+
+`deprovision(tenantName)` supprime définitivement le schéma (`DROP SCHEMA … CASCADE`) et retire
+le tenant du registry local. Opération destructrice, typiquement utilisée pour la suppression
+d'une organisation ou la **compensation** (rollback) d'un provisioning échoué. Le
+désenregistrement côté Config Manager reste explicite via `ConfigManagerClient.deleteTenant`.
+
+#### Cycle de vie des tenants côté Config Manager
+
+`ConfigManagerClient` expose, en plus de la lecture du registry, les opérations d'écriture
+utilisées par le provisioning applicatif :
+
+| Méthode | Rôle |
+|---|---|
+| `createTenant(name, displayName)` | Crée le tenant (sémantique *create-or-get* : retourne l'id existant sur 409) |
+| `listTenants()` / `findTenantIdByName(name)` | Liste / recherche des tenants de l'application |
+| `getTenantProperties(id)` / `updateTenantProperties(id, map)` | Lecture / remplacement des propriétés |
+| `deleteTenant(id)` | Suppression du tenant |
+
 #### Configuration du Config Manager
 
 ```yaml
@@ -303,6 +411,7 @@ multitenant:
     base-url: http://localhost:8090
     registry-path: /api/config/v1/registry/{applicationName}
     application-path: /api/config/v1/applications
+    tenants-path: /api/config/v1/tenants
     auto-create-application: true
     fail-fast: false
 ```

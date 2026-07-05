@@ -85,6 +85,15 @@ public class SchemaAdmin {
         jdbcTemplate.execute("CREATE SCHEMA IF NOT EXISTS " + SchemaUtils.quote(schemaName));
     }
 
+    /**
+     * Supprime définitivement un schéma et tout son contenu (CASCADE).
+     * Opération destructrice : réservée au dé-provisioning d'un tenant.
+     */
+    public void dropSchemaIfExists(String schemaName) {
+        jdbcTemplate.execute("DROP SCHEMA IF EXISTS " + SchemaUtils.quote(schemaName) + " CASCADE");
+        log.info("Schema '{}' dropped.", schemaName);
+    }
+
     public void renameSchema(String fromSchema, String toSchema) {
         jdbcTemplate.execute("ALTER SCHEMA " + SchemaUtils.quote(fromSchema) + " RENAME TO " + SchemaUtils.quote(toSchema));
     }

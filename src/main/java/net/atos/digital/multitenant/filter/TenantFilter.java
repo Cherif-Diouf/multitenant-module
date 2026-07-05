@@ -21,6 +21,7 @@ import net.atos.digital.multitenant.utils.ProfileConstants;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import org.springframework.util.AntPathMatcher;
@@ -32,7 +33,17 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * Filtre historique basé exclusivement sur le header {@code X-TENANT}.
+ * <p>
+ * Actif par défaut ({@code multitenant.filter.mode=legacy}). Les applications qui ont besoin
+ * d'une résolution de tenant personnalisée (JWT, sous-domaine, etc.) doivent passer en
+ * {@code multitenant.filter.mode=resolver} : ce filtre est alors remplacé par la paire
+ * {@code TenantResolutionFilter}/{@code TenantEnforcementFilter} pilotée par le SPI
+ * {@link net.atos.digital.multitenant.resolution.TenantResolver}.
+ */
 @Profile(ProfileConstants.MULTI_SCHEMA_OR_MULTITENANT)
+@ConditionalOnProperty(prefix = "multitenant.filter", name = "mode", havingValue = "legacy", matchIfMissing = true)
 @Slf4j
 @Component
 public class TenantFilter extends OncePerRequestFilter {
@@ -141,10 +152,14 @@ public class TenantFilter extends OncePerRequestFilter {
 
         log.trace("Before tenant filter. Name: {}", tenant);
 
-        filterChain.doFilter(req, res);
-
-        log.trace("After Tenant Filter. Cleaning tenant");
-        this.tenantContext.clear();
+        try {
+            filterChain.doFilter(req, res);
+        } finally {
+            // Nettoyage garanti même en cas d'exception dans la chaîne :
+            // sans finally, le tenant resterait attaché au thread du pool du serveur.
+            log.trace("After Tenant Filter. Cleaning tenant");
+            this.tenantContext.clear();
+        }
     }
 
     private void filterForMultiSchema(String currentTenantName, HttpServletRequest req, HttpServletResponse res, FilterChain filterChain) throws IOException, ServletException {

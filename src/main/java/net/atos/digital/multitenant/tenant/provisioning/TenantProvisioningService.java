@@ -25,6 +25,21 @@ public interface TenantProvisioningService {
     Tenant provision(String tenantId, String tenantName);
 
     /**
+     * Dé-provisionne un tenant : suppression du schéma PostgreSQL (DROP … CASCADE)
+     * et retrait du tenant du registry local.
+     * <p>
+     * Opération destructrice et définitive — typiquement utilisée pour la suppression
+     * d'une organisation ou la compensation (rollback) d'un provisioning échoué.
+     * Le désenregistrement côté Config Manager reste à la charge de l'appelant
+     * (via {@code ConfigManagerClient.deleteTenant}), car le tenant peut exister
+     * sur le Config Manager sans schéma local et inversement.
+     *
+     * @param tenantName Nom du tenant (= nom du schéma PostgreSQL, lowercase)
+     * @throws IllegalArgumentException si le nom du schéma est invalide
+     */
+    void deprovision(String tenantName);
+
+    /**
      * Nettoie le TenantContext courant.
      * À appeler dans un bloc finally après le provisioning si nécessaire.
      */

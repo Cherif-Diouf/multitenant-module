@@ -27,7 +27,7 @@ public class TenantContext {
 
     public String getCurrentSchemaName() {
         if (currentTenant.get() != null) {
-            log.info("schema name --------------- {}", currentTenant.get().schemaName());
+            log.trace("Current schema name: {}", currentTenant.get().schemaName());
             return currentTenant.get().schemaName();
         }
         return "";
@@ -40,7 +40,9 @@ public class TenantContext {
 
     public void clear() {
         currentTenant.remove();
-        MDC.clear();
+        // Ne retire que la clé "tenant" : MDC.clear() effacerait les entrées
+        // posées par l'application (correlation id, etc.).
+        MDC.remove("tenant");
     }
 
     public String getTenantCollectionNameForMongo(Tenant tenant, String collectionName) {
